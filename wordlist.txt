@@ -1,0 +1,8 @@
+root
+admin
+123456
+password
+xc3511
+vizxv
+default
+1234
