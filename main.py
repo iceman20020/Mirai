@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3a
 # main.py — cnc builder entry.
 # prints banner, loads config, runs builder.
 
